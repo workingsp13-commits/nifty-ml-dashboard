@@ -24,94 +24,57 @@ ITM_DELTA = 0.70  # Delta value for ITM Options (~0.70)
 TODAY_STR = datetime.now().strftime("%Y-%m-%d")
 CSV_FILE = "trades_master.csv"
 
-# Skypro / Gopocket Fixed Credentials
+# Skypro Fixed Credentials
 SKY_CLIENT_ID = "SKY62341"
 SKY_PASSWORD = "Good@123"
 SKY_API_SECRET = (
     "brrHxkaGmkoALkDdbpiaHImbX3BIPx48d3LrdRqOgaLODopaapkoDjaMqNMpX4dX"
 )
-BASE_URL = "https://api.gopocket.in"  # Skypro Direct Interactive Endpoint
+BASE_URL = "https://api.gopocket.in"
 
-# Session States for Managing OTP Lifecycle
+# Session State for Token
 if "sky_token" not in st.session_state:
     st.session_state["sky_token"] = None
-if "otp_sent" not in st.session_state:
-    st.session_state["otp_sent"] = False
 
 # ------------------------------------------
-# 1. Sidebar - Mobile OTP Login Engine
+# 1. Sidebar - Direct Mobile OTP / TOTP Entry
 # ------------------------------------------
 st.sidebar.header("🔐 Skypro Daily Login")
 
-with st.sidebar.expander("SMS OTP Login", expanded=True):
+with st.sidebar.expander("Gopocket / Skypro Login", expanded=True):
     st.write(f"**User ID:** `{SKY_CLIENT_ID}`")
 
-    # STEP 1: Request Mobile OTP using Password authentication
-    if not st.session_state["otp_sent"]:
-        if st.button("📲 Send OTP to Registered Mobile"):
+    mobile_otp = st.text_input(
+        "Enter OTP / TOTP (from Mobile/App)",
+        type="password",
+        key="direct_otp_input",
+    )
+
+    if st.button("Connect Live"):
+        if mobile_otp:
             try:
-                otp_req_url = f"{BASE_URL}/interactive/user/otp"
+                login_url = f"{BASE_URL}/interactive/user/session"
                 payload = {
                     "appKey": SKY_CLIENT_ID,
                     "secretKey": SKY_API_SECRET,
                     "password": SKY_PASSWORD,
                     "source": "WebAPI",
+                    "twoFA": mobile_otp,
                 }
-                res = requests.post(otp_req_url, json=payload, timeout=5)
-
+                res = requests.post(login_url, json=payload, timeout=5)
                 if res.status_code == 200:
-                    st.session_state["otp_sent"] = True
-                    st.sidebar.success("OTP Sent to Mobile Number!")
-                    st.rerun()
+                    token_data = res.json().get("result", {}).get("token", None)
+                    if token_data:
+                        st.session_state["sky_token"] = token_data
+                        st.sidebar.success("Connected to Skypro Live Feed!")
+                    else:
+                        st.sidebar.error("Invalid Response / Check OTP.")
                 else:
-                    # Retry with alternate login endpoint if direct OTP call differs
-                    st.session_state["otp_sent"] = True
-                    st.sidebar.info("OTP Trigger Request Sent. Check your Mobile.")
+                    st.sidebar.error("Login Failed. Verify OTP/Password.")
             except Exception as e:
-                st.sidebar.error(f"Failed to Send OTP: {str(e)}")
-
-    # STEP 2: Enter Received Mobile OTP & Authenticate
-    else:
-        mobile_otp = st.text_input(
-            "Enter Mobile OTP", type="password", key="mobile_otp_input"
-        )
-        col_login, col_resend = st.columns([1, 1])
-
-        with col_login:
-            if st.button("Connect Live"):
-                if mobile_otp:
-                    try:
-                        login_url = f"{BASE_URL}/interactive/user/session"
-                        payload = {
-                            "appKey": SKY_CLIENT_ID,
-                            "secretKey": SKY_API_SECRET,
-                            "password": SKY_PASSWORD,
-                            "source": "WebAPI",
-                            "twoFA": mobile_otp,
-                        }
-                        res = requests.post(login_url, json=payload, timeout=5)
-                        if res.status_code == 200:
-                            token_data = (
-                                res.json().get("result", {}).get("token", None)
-                            )
-                            if token_data:
-                                st.session_state["sky_token"] = token_data
-                                st.sidebar.success(
-                                    "Connected to Skypro Live Feed!"
-                                )
-                            else:
-                                st.sidebar.error("Invalid OTP or Response.")
-                        else:
-                            st.sidebar.error("Login Failed. Check OTP.")
-                    except Exception as e:
-                        st.sidebar.error(f"Auth Error: {str(e)}")
-                else:
-                    st.sidebar.warning("Enter OTP to proceed.")
-
-        with col_resend:
-            if st.button("Resend OTP"):
-                st.session_state["otp_sent"] = False
-                st.rerun()
+                st.sidebar.error(f"Auth Error: {str(e)}")
+        else:
+            st.sidebar.warning("Enter OTP to connect.")
 
 if st.session_state["sky_token"]:
     st.sidebar.info("Status: Skypro Direct Feed Active 🟢")
