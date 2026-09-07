@@ -2,12 +2,12 @@ name: Run ML Signal Engine
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # Runs every 5 minutes during market hours
-  workflow_dispatch:        # Allows manual run anytime
+    - cron: '*/5 * * * *'  # Runs every 5 minutes
+  workflow_dispatch:        # Allows manual trigger anytime
 
 jobs:
   run-trading-bot:
-    runs-runs-on: ubuntu-latest
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout Repository
@@ -25,7 +25,7 @@ jobs:
 
     - name: Run Trading Strategy Script
       run: |
-        python main.py  # Replace with your main trading bot file name if different
+        python main.py
 
     - name: Commit and Push Updated Trades CSV
       run: |
