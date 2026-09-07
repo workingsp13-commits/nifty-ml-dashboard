@@ -2,7 +2,6 @@ import os
 import time
 import warnings
 from datetime import datetime
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import requests
@@ -24,13 +23,9 @@ LOT_SIZE = 65
 TODAY_STR = datetime.now().strftime("%Y-%m-%d")
 CSV_FILE = f"live_trades_{TODAY_STR}.csv"
 
-# Session State for Auto Refresh & Live Tracking
-if "last_refresh" not in st.session_state:
-    st.session_state.last_refresh = time.time()
-
 
 # ------------------------------------------
-# 1. Direct NSE Live Data Fetcher (No yfinance)
+# 1. Direct NSE Live Data Fetcher
 # ------------------------------------------
 def fetch_nse_live_data():
     """Fetches Real-Time Nifty Price directly from NSE API"""
@@ -55,19 +50,20 @@ def fetch_nse_live_data():
     except Exception:
         pass
 
-    # Fallback to random simulation if market is closed / NSE blocks request
     if os.path.exists(CSV_FILE):
-        df_temp = pd.read_csv(CSV_FILE)
-        if not df_temp.empty and "Entry_Price" in df_temp.columns:
-            return float(df_temp["Entry_Price"].iloc[-1])
-    return 23800.0
+        try:
+            df_temp = pd.read_csv(CSV_FILE)
+            if not df_temp.empty and "Entry_Price" in df_temp.columns:
+                return float(df_temp["Entry_Price"].iloc[-1])
+        except Exception:
+            pass
+    return 23800.00
 
 
 # ------------------------------------------
-# 2. Local CSV Database Operations (Today Only)
+# 2. Local CSV Data Management (Persistent Log)
 # ------------------------------------------
 def init_today_csv():
-    """Ensures CSV exists for today's trades only"""
     if not os.path.exists(CSV_FILE):
         df_empty = pd.DataFrame(
             columns=[
@@ -88,17 +84,9 @@ def init_today_csv():
 def load_today_trades():
     init_today_csv()
     try:
-        df = pd.read_csv(CSV_FILE)
-        return df
+        return pd.read_csv(CSV_FILE)
     except Exception:
         return pd.DataFrame()
-
-
-def save_trade(trade_dict):
-    init_today_csv()
-    df = load_today_trades()
-    df = pd.concat([df, pd.DataFrame([trade_dict])], ignore_index=False)
-    df.to_csv(CSV_FILE, index=False)
 
 
 def update_trades_file(df):
@@ -106,26 +94,24 @@ def update_trades_file(df):
 
 
 # ------------------------------------------
-# 3. Live PnL & Position Execution Engine
+# 3. Live Price & Position Processing
 # ------------------------------------------
 live_nifty_price = fetch_nse_live_data()
 trades_df = load_today_trades()
 
-# Real-time Position Management (Open Trade Streamer)
+# Real-time Position Live Stream Engine
 if not trades_df.empty:
     for idx, row in trades_df.iterrows():
         if row["Status"] == "OPEN":
             entry = float(row["Entry_Price"])
             is_ce = "CE" in str(row["Type"])
 
-            # Calculate Live Moving Points
             current_move = (
                 (live_nifty_price - entry)
                 if is_ce
                 else (entry - live_nifty_price)
             )
 
-            # Check SL (-15 Pts) & Target (+45 Pts) Conditions
             if current_move >= 45.0:
                 trades_df.at[idx, "Exit_Price"] = (
                     entry + 45.0 if is_ce else entry - 45.0
@@ -141,7 +127,6 @@ if not trades_df.empty:
                 trades_df.at[idx, "Points_P&L"] = -15.0
                 trades_df.at[idx, "Rupees_P&L"] = -15.0 * LOT_SIZE
             else:
-                # Still OPEN: Stream Live Unrealized PnL
                 trades_df.at[idx, "Points_P&L"] = round(current_move, 2)
                 trades_df.at[idx, "Rupees_P&L"] = round(
                     current_move * LOT_SIZE, 2
@@ -152,49 +137,7 @@ if not trades_df.empty:
 # ------------------------------------------
 # 4. Streamlit Dashboard View
 # ------------------------------------------
-st.sidebar.header("⚙️ Controls")
-
-# Manual Trigger for Live Paper Trade (Testing/Live Signal)
-st.sidebar.subheader("🎯 Manual Signal Trigger")
-col_btn1, col_btn2 = st.sidebar.columns(2)
-if col_btn1.button("🟢 Buy CE"):
-    atm = round(live_nifty_price / 50) * 50
-    new_trade = {
-        "Date": TODAY_STR,
-        "Time": datetime.now().strftime("%H:%M:%S"),
-        "Type": "CE BUY",
-        "Option_Strike": f"{int(atm)} CE (ATM)",
-        "Entry_Price": live_nifty_price,
-        "Exit_Price": 0.0,
-        "Status": "OPEN",
-        "Points_P&L": 0.0,
-        "Rupees_P&L": 0.0,
-    }
-    save_trade(new_trade)
-    st.rerun()
-
-if col_btn2.button("🔴 Buy PE"):
-    atm = round(live_nifty_price / 50) * 50
-    new_trade = {
-        "Date": TODAY_STR,
-        "Time": datetime.now().strftime("%H:%M:%S"),
-        "Type": "PE BUY",
-        "Option_Strike": f"{int(atm)} PE (ATM)",
-        "Entry_Price": live_nifty_price,
-        "Exit_Price": 0.0,
-        "Status": "OPEN",
-        "Points_P&L": 0.0,
-        "Rupees_P&L": 0.0,
-    }
-    save_trade(new_trade)
-    st.rerun()
-
-if st.sidebar.button("🧹 Reset Today's Trades"):
-    if os.path.exists(CSV_FILE):
-        os.remove(CSV_FILE)
-    st.rerun()
-
-# Dynamic Metrics Calculation
+# Metrics
 tot_trades = len(trades_df)
 net_pts = (
     trades_df["Points_P&L"].sum()
@@ -217,12 +160,7 @@ c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("NSE Live Nifty", f"{live_nifty_price:.2f}")
 c2.metric("Today Trades", tot_trades)
 c3.metric("Net Points P&L", f"{net_pts:+.2f} Pts")
-c4.metric(
-    "Net Rupees P&L",
-    f"₹ {net_rs:,.2f}",
-    delta=f"{net_rs:,.2f}",
-    delta_color="normal",
-)
+c4.metric("Net Rupees P&L", f"₹ {net_rs:,.2f}")
 c5.metric("Win Rate", f"{win_rate}%")
 
 st.markdown("---")
@@ -230,28 +168,26 @@ st.markdown("---")
 col_chart, col_table = st.columns([4, 6])
 
 with col_chart:
-    st.subheader("📊 Live Nifty Ticker")
+    st.subheader("📊 Live Nifty Spot Price")
+    # Display Full Exact Price without 23.8k short formatting
     fig = go.Figure(
         go.Indicator(
-            mode="number+delta",
+            mode="number",
             value=live_nifty_price,
+            number={"valueformat": ".2f", "suffix": " Pts"},
             title={"text": "NIFTY 50 Spot Price"},
-            delta={"reference": 23800.0, "relative": False},
         )
     )
-    fig.update_layout(height=300, template="plotly_dark")
+    fig.update_layout(height=280, template="plotly_dark")
     st.plotly_chart(fig, use_container_width=True)
 
 with col_table:
     st.subheader(f"📜 Today's Live Positions & Signals ({TODAY_STR})")
     if not trades_df.empty:
-        # Display Live Table with Status
-        st.dataframe(trades_df, use_container_width=True, height=320)
+        st.dataframe(trades_df, use_container_width=True, height=300)
     else:
-        st.info(
-            "No positions active for today yet. Use triggers above or webhooks to initiate."
-        )
+        st.info("No active positions recorded for today yet.")
 
-# Auto-refresh app every 3 seconds to stream live broker-like PnL
-time.sleep(3)
+# Auto-refresh app every 2 seconds for live stream
+time.sleep(2)
 st.rerun()
