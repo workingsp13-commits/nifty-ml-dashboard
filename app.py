@@ -11,12 +11,12 @@ warnings.filterwarnings("ignore")
 
 # Streamlit Page Config
 st.set_page_config(
-    page_title="Nifty ML Live Paper Trader", layout="wide", page_icon="📈"
+    page_title="Nifty Live Paper Trader", layout="wide", page_icon="📈"
 )
 
 st.title("📈 Nifty Live Paper Trading Dashboard")
 st.caption(
-    "Live Real-Time ITM Option PnL Tracker | Target: +45 Pts Premium | SL: -15 Pts Premium"
+    "Live Real-Time ITM Option PnL Tracker | Powered by Gopocket Direct Feed"
 )
 
 LOT_SIZE = 65
@@ -24,18 +24,92 @@ ITM_DELTA = 0.70  # Delta value for ITM Options (~0.70)
 TODAY_STR = datetime.now().strftime("%Y-%m-%d")
 CSV_FILE = "trades_master.csv"
 
+# Hardcoded API Credentials
+GOPOCKET_CLIENT_ID = "SKY62341"
+GOPOCKET_API_SECRET = (
+    "brrHxkaGmkoALkDdbpiaHImbX3BIPx48d3LrdRqOgaLODopaapkoDjaMqNMpX4dX"
+)
+
+# Session State for Storing Token Throughout the Day
+if "gopocket_token" not in st.session_state:
+    st.session_state["gopocket_token"] = None
 
 # ------------------------------------------
-# 1. Direct Fast Live Data Fetcher
+# 1. Sidebar - Gopocket Daily Login (TOTP Only)
 # ------------------------------------------
-def fetch_live_market_price():
-    """Fetches fast real-time Nifty Spot Price for ITM Option dynamic calculation"""
-    url = "https://priceapi.moneycontrol.com/technicalData/v1/index/technicalChartData?symbol=IN%3BNSX&time=1"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Referer": "https://www.moneycontrol.com/",
-    }
+st.sidebar.header("🔐 Gopocket Daily Login")
+
+with st.sidebar.expander("Gopocket OTP Login", expanded=True):
+    st.write(f"**Client ID:** `{GOPOCKET_CLIENT_ID}`")
+    user_otp = st.text_input(
+        "Enter Today's OTP / TOTP", type="password", key="otp_input"
+    )
+
+    if st.button("Connect Gopocket Live"):
+        if user_otp:
+            try:
+                # Gopocket Interactive API Authentication Flow
+                login_url = "https://api.gopocket.in/interactive/user/session"
+                payload = {
+                    "secretKey": GOPOCKET_API_SECRET,
+                    "appKey": GOPOCKET_CLIENT_ID,
+                    "source": "WebAPI",
+                    "twoFA": user_otp,
+                }
+                res = requests.post(login_url, json=payload, timeout=3)
+                if res.status_code == 200:
+                    token_data = (
+                        res.json().get("result", {}).get("token", None)
+                    )
+                    if token_data:
+                        st.session_state["gopocket_token"] = token_data
+                        st.sidebar.success(
+                            "Connected to Gopocket Direct Feed!"
+                        )
+                    else:
+                        st.sidebar.error("Invalid Response. Check OTP.")
+                else:
+                    st.sidebar.error("Login Failed. Verify OTP.")
+            except Exception as e:
+                st.sidebar.error(f"Connection Error: {str(e)}")
+        else:
+            st.sidebar.warning("Please enter OTP to connect.")
+
+if st.session_state["gopocket_token"]:
+    st.sidebar.info("Status: Gopocket Feed Active 🟢")
+else:
+    st.sidebar.warning("Status: Running on Backup Fast Feed 🟡")
+
+
+# ------------------------------------------
+# 2. Fast Live Data Fetcher Engine
+# ------------------------------------------
+def fetch_live_nifty_price():
+    # Primary Source: Gopocket Direct API (Zero Delay)
+    token = st.session_state.get("gopocket_token")
+    if token:
+        try:
+            quote_url = "https://api.gopocket.in/marketdata/instruments/quotes"
+            headers = {"Authorization": token}
+            quote_res = requests.get(
+                quote_url,
+                headers=headers,
+                params={"instruments": "NSE_INDEX|NIFTY 50"},
+                timeout=1.5,
+            )
+            if quote_res.status_code == 200:
+                last_price = (
+                    quote_res.json().get("result", {}).get("lastPrice", None)
+                )
+                if last_price and float(last_price) > 0:
+                    return float(last_price)
+        except Exception:
+            pass
+
+    # Secondary Source: Direct Fast Market Backup API
     try:
+        url = "https://priceapi.moneycontrol.com/technicalData/v1/index/technicalChartData?symbol=IN%3BNSX&time=1"
+        headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(url, headers=headers, timeout=1.5)
         if res.status_code == 200:
             data = res.json()
@@ -44,25 +118,11 @@ def fetch_live_market_price():
     except Exception:
         pass
 
-    # Backup Session Feed
-    try:
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=1.5)
-        res = session.get(
-            "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050",
-            headers=headers,
-            timeout=1.5,
-        )
-        if res.status_code == 200:
-            return float(res.json()["data"][0]["lastPrice"])
-    except Exception:
-        pass
-
     return 23772.05
 
 
 # ------------------------------------------
-# 2. Database Initialization & Support
+# 3. Master CSV Database Operations
 # ------------------------------------------
 def init_master_csv():
     if not os.path.exists(CSV_FILE):
@@ -87,9 +147,13 @@ def load_all_trades():
     init_master_csv()
     try:
         df = pd.read_csv(CSV_FILE)
-        # Old Schema Compatibility
-        if "Entry_Price" in df.columns and "Option_Entry_Price" not in df.columns:
-            df.rename(columns={"Entry_Price": "Option_Entry_Price"}, inplace=True)
+        if (
+            "Entry_Price" in df.columns
+            and "Option_Entry_Price" not in df.columns
+        ):
+            df.rename(
+                columns={"Entry_Price": "Option_Entry_Price"}, inplace=True
+            )
         return df
     except Exception:
         return pd.DataFrame()
@@ -100,9 +164,9 @@ def update_trades_file(df):
 
 
 # ------------------------------------------
-# 3. ITM Option Premium PnL Engine
+# 4. ITM Option Live PnL Processing Engine
 # ------------------------------------------
-live_nifty_price = fetch_live_market_price()
+live_nifty_price = fetch_live_nifty_price()
 all_trades_df = load_all_trades()
 
 if not all_trades_df.empty:
@@ -111,20 +175,18 @@ if not all_trades_df.empty:
             entry_premium = float(row["Option_Entry_Price"])
             is_ce = "CE" in str(row["Type"])
 
-            # Spot Reference price when order was placed
             spot_ref = float(row.get("Spot_Reference", live_nifty_price))
             if pd.isna(spot_ref) or spot_ref <= 0:
                 spot_ref = live_nifty_price
                 all_trades_df.at[idx, "Spot_Reference"] = spot_ref
 
-            # Spot price movement calculation
             spot_diff = (
                 (live_nifty_price - spot_ref)
                 if is_ce
                 else (spot_ref - live_nifty_price)
             )
 
-            # Live ITM Premium estimation based on Delta 0.70
+            # ITM Option Premium estimation based on Delta 0.70
             current_option_premium = round(
                 entry_premium + (spot_diff * ITM_DELTA), 2
             )
@@ -132,10 +194,9 @@ if not all_trades_df.empty:
                 current_option_premium
             )
 
-            # Premium Movement Points
             premium_pts_move = round(current_option_premium - entry_premium, 2)
 
-            # Target / SL based STRICTLY on ITM Option Premium (+45 / -15)
+            # Target / SL logic strictly on ITM Premium (+45 / -15)
             if premium_pts_move >= 45.0:
                 all_trades_df.at[idx, "Option_Current_Price"] = (
                     entry_premium + 45.0
@@ -159,8 +220,9 @@ if not all_trades_df.empty:
     update_trades_file(all_trades_df)
 
 # ------------------------------------------
-# 4. Streamlit UI Dashboard
+# 5. Streamlit UI Dashboard & Date Filter
 # ------------------------------------------
+st.sidebar.markdown("---")
 st.sidebar.header("🗓️ History Filter")
 
 available_dates = (
@@ -202,7 +264,7 @@ wins = (
 win_rate = round((wins / tot_trades * 100), 2) if tot_trades > 0 else 0.0
 
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("NSE Live Nifty", f"{live_nifty_price:.2f}")
+c1.metric("Live Nifty Spot", f"{live_nifty_price:.2f}")
 c2.metric("Total Trades", tot_trades)
 c3.metric("Net Points P&L", f"{net_pts:+.2f} Pts")
 c4.metric("Net Rupees P&L", f"₹ {net_rs:,.2f}")
@@ -232,6 +294,6 @@ with col_table:
     else:
         st.info("No recorded trades found for this filter.")
 
-# 1-Second Refresh Loop
+# 1-Second Auto Refresh Loop
 time.sleep(1)
 st.rerun()
