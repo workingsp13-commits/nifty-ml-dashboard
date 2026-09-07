@@ -24,9 +24,7 @@ st.caption(
 )
 
 
-# ------------------------------------------
 # Helper: Fetch Real Live Option LTP
-# ------------------------------------------
 def get_real_option_ltp(strike, option_type):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -34,12 +32,24 @@ def get_real_option_ltp(strike, option_type):
         res = requests.get(opt_url, headers=headers, timeout=3).json()
         return float(res["data"]["lastPrice"])
     except Exception:
-        return 135.0  # Fallback if market API fails
+        return 135.0
 
 
-# ------------------------------------------
+# Default DataFrame Columns Template
+DEFAULT_COLUMNS = [
+    "Date",
+    "Time",
+    "Type",
+    "Strike",
+    "Option Entry Price",
+    "Option Exit Price",
+    "Result",
+    "Points P&L",
+    "Rupees P&L (₹)",
+]
+
+
 # ML Model & Signal Engine (Your Original Logic Unchanged)
-# ------------------------------------------
 @st.cache_resource
 def generate_15day_signals():
     data = yf.download("^NSEI", period="60d", interval="5m", progress=False)
@@ -192,19 +202,28 @@ def generate_15day_signals():
     hist_df = pd.DataFrame(historical_trades)
     if len(hist_df) > 0:
         hist_df = hist_df.groupby(["Date", "Time"]).first().reset_index()
+    else:
+        hist_df = pd.DataFrame(columns=DEFAULT_COLUMNS)
     return model, hist_df
 
 
 model, historical_df = generate_15day_signals()
 
-# Load CSV safely and RECALCULATE Rupees PnL with Lot Size = 65
+# Safe CSV Loading & KeyError Prevention logic
 if not os.path.exists(CSV_FILE) or os.path.getsize(CSV_FILE) < 10:
     historical_df.to_csv(CSV_FILE, index=False)
     trade_history_df = historical_df.copy()
 else:
-    trade_history_df = pd.read_csv(CSV_FILE)
+    try:
+        trade_history_df = pd.read_csv(CSV_FILE)
+        if "Points P&L" not in trade_history_df.columns:
+            trade_history_df = historical_df.copy()
+            trade_history_df.to_csv(CSV_FILE, index=False)
+    except Exception:
+        trade_history_df = historical_df.copy()
+        trade_history_df.to_csv(CSV_FILE, index=False)
 
-if len(trade_history_df) > 0:
+if len(trade_history_df) > 0 and "Points P&L" in trade_history_df.columns:
     trade_history_df["Rupees P&L (₹)"] = (
         trade_history_df["Points P&L"] * LOT_SIZE
     )
@@ -298,14 +317,12 @@ st.sidebar.header("📅 Date Filter")
 
 today_str = datetime.now().strftime("%Y-%m-%d")
 
-# Building dates list
 existing_dates = []
-if len(trade_history_df) > 0:
+if len(trade_history_df) > 0 and "Date" in trade_history_df.columns:
     existing_dates = sorted(
         trade_history_df["Date"].unique().tolist(), reverse=True
     )
 
-# Build selection menu with TODAY as Default
 date_options = [today_str]
 for d in existing_dates:
     if d not in date_options:
@@ -332,7 +349,12 @@ if st.sidebar.button("🗑️ Clear History"):
 if selected_date == "All Days":
     filtered_df = trade_history_df
 else:
-    filtered_df = trade_history_df[trade_history_df["Date"] == selected_date]
+    if "Date" in trade_history_df.columns:
+        filtered_df = trade_history_df[
+            trade_history_df["Date"] == selected_date
+        ]
+    else:
+        filtered_df = pd.DataFrame(columns=DEFAULT_COLUMNS)
 
 # Live Market & Top Metrics
 col1, col2, col3, col4, col5 = st.columns(5)
@@ -343,21 +365,25 @@ current_nifty = (
 
 total_trades_count = len(filtered_df)
 total_pnl_pts = (
-    filtered_df["Points P&L"].sum() if total_trades_count > 0 else 0.0
+    filtered_df["Points P&L"].sum()
+    if total_trades_count > 0 and "Points P&L" in filtered_df.columns
+    else 0.0
 )
 total_pnl_rs = (
-    filtered_df["Rupees P&L (₹)"].sum() if total_trades_count > 0 else 0.0
+    filtered_df["Rupees P&L (₹)"].sum()
+    if total_trades_count > 0 and "Rupees P&L (₹)" in filtered_df.columns
+    else 0.0
 )
 
 win_rate = 0.0
-if total_trades_count > 0:
+if total_trades_count > 0 and "Points P&L" in filtered_df.columns:
     wins = len(filtered_df[filtered_df["Points P&L"] > 0])
     win_rate = round((wins / total_trades_count) * 100, 2)
 
 overall_trades_count = len(trade_history_df)
 overall_win_rate = 0.0
 overall_wins = 0
-if overall_trades_count > 0:
+if overall_trades_count > 0 and "Points P&L" in trade_history_df.columns:
     overall_wins = len(trade_history_df[trade_history_df["Points P&L"] > 0])
     overall_win_rate = round((overall_wins / overall_trades_count) * 100, 2)
 
@@ -380,7 +406,6 @@ st.markdown("---")
 st.subheader("🔴 Live Position Status")
 
 if signal:
-    # Get Real Traded Option Rate (LTP)
     opt_entry = get_real_option_ltp(signal["strike_val"], signal["opt_type"])
     curr_nifty = df_live["Close"].iloc[-1]
     pts_diff = round(
@@ -410,9 +435,8 @@ if signal:
         unsafe_allow_html=True,
     )
 
-    # Automatically save trade if completed
     already_placed = False
-    if len(trade_history_df) > 0:
+    if len(trade_history_df) > 0 and "Date" in trade_history_df.columns:
         match = trade_history_df[
             (trade_history_df["Date"] == signal["date"])
             & (trade_history_df["Time"] == signal["time"])
@@ -495,13 +519,17 @@ with col_history:
                 return "background-color: #4a1212; color: #ff4d4d; font-weight: bold;"
             return ""
 
+        valid_subsets = [
+            col
+            for col in ["Result", "Points P&L", "Rupees P&L (₹)"]
+            if col in filtered_df.columns
+        ]
+
         if hasattr(filtered_df.style, "map"):
-            styled_df = filtered_df.style.map(
-                color_pnl, subset=["Result", "Points P&L", "Rupees P&L (₹)"]
-            )
+            styled_df = filtered_df.style.map(color_pnl, subset=valid_subsets)
         else:
             styled_df = filtered_df.style.applymap(
-                color_pnl, subset=["Result", "Points P&L", "Rupees P&L (₹)"]
+                color_pnl, subset=valid_subsets
             )
 
         st.dataframe(styled_df, use_container_width=True, height=360)
@@ -523,7 +551,7 @@ with col_history:
 st.markdown("---")
 st.subheader("🗓️ Day-wise Performance Summary")
 
-if len(trade_history_df) > 0:
+if len(trade_history_df) > 0 and "Date" in trade_history_df.columns:
     day_summary = trade_history_df.groupby("Date", as_index=False).agg(
         Total_Trades=("Points P&L", "count"),
         Net_Points=("Points P&L", "sum"),
