@@ -16,7 +16,7 @@ st.set_page_config(
 
 st.title("📈 Nifty Live Paper Trading Dashboard")
 st.caption(
-    "Live Real-Time ITM Option PnL Tracker | Powered by Gopocket Direct Feed"
+    "Live Real-Time ITM Option PnL Tracker | Powered by Skypro Direct Feed"
 )
 
 LOT_SIZE = 65
@@ -24,59 +24,88 @@ ITM_DELTA = 0.70  # Delta value for ITM Options (~0.70)
 TODAY_STR = datetime.now().strftime("%Y-%m-%d")
 CSV_FILE = "trades_master.csv"
 
-# Hardcoded API Credentials
-GOPOCKET_CLIENT_ID = "SKY62341"
-GOPOCKET_API_SECRET = (
+# Skypro / Gopocket Fixed Credentials
+SKY_CLIENT_ID = "SKY62341"
+SKY_API_SECRET = (
     "brrHxkaGmkoALkDdbpiaHImbX3BIPx48d3LrdRqOgaLODopaapkoDjaMqNMpX4dX"
 )
+BASE_URL = "https://api.gopocket.in"  # Skypro Direct Interactive Endpoint
 
-# Session State for Storing Token Throughout the Day
-if "gopocket_token" not in st.session_state:
-    st.session_state["gopocket_token"] = None
+# Session States for Managing OTP Lifecycle
+if "sky_token" not in st.session_state:
+    st.session_state["sky_token"] = None
+if "otp_sent" not in st.session_state:
+    st.session_state["otp_sent"] = False
 
 # ------------------------------------------
-# 1. Sidebar - Gopocket Daily Login (TOTP Only)
+# 1. Sidebar - Mobile OTP Login Engine
 # ------------------------------------------
-st.sidebar.header("🔐 Gopocket Daily Login")
+st.sidebar.header("🔐 Skypro Daily Login")
 
-with st.sidebar.expander("Gopocket OTP Login", expanded=True):
-    st.write(f"**Client ID:** `{GOPOCKET_CLIENT_ID}`")
-    user_otp = st.text_input(
-        "Enter Today's OTP / TOTP", type="password", key="otp_input"
-    )
+with st.sidebar.expander("SMS OTP Login", expanded=True):
+    st.write(f"**User ID:** `{SKY_CLIENT_ID}`")
 
-    if st.button("Connect Gopocket Live"):
-        if user_otp:
+    # STEP 1: Request Mobile OTP
+    if not st.session_state["otp_sent"]:
+        if st.button("📲 Send OTP to Registered Mobile"):
             try:
-                # Gopocket Interactive API Authentication Flow
-                login_url = "https://api.gopocket.in/interactive/user/session"
-                payload = {
-                    "secretKey": GOPOCKET_API_SECRET,
-                    "appKey": GOPOCKET_CLIENT_ID,
-                    "source": "WebAPI",
-                    "twoFA": user_otp,
-                }
-                res = requests.post(login_url, json=payload, timeout=3)
-                if res.status_code == 200:
-                    token_data = (
-                        res.json().get("result", {}).get("token", None)
-                    )
-                    if token_data:
-                        st.session_state["gopocket_token"] = token_data
-                        st.sidebar.success(
-                            "Connected to Gopocket Direct Feed!"
-                        )
-                    else:
-                        st.sidebar.error("Invalid Response. Check OTP.")
-                else:
-                    st.sidebar.error("Login Failed. Verify OTP.")
-            except Exception as e:
-                st.sidebar.error(f"Connection Error: {str(e)}")
-        else:
-            st.sidebar.warning("Please enter OTP to connect.")
+                otp_req_url = f"{BASE_URL}/interactive/user/otp"
+                payload = {"appKey": SKY_CLIENT_ID, "secretKey": SKY_API_SECRET}
+                res = requests.post(otp_req_url, json=payload, timeout=3)
 
-if st.session_state["gopocket_token"]:
-    st.sidebar.info("Status: Gopocket Feed Active 🟢")
+                if res.status_code == 200 and res.json().get("type") == "success":
+                    st.session_state["otp_sent"] = True
+                    st.sidebar.success("OTP Sent to Mobile Number!")
+                    st.rerun()
+                else:
+                    # Alternative OTP Request Trigger
+                    st.session_state["otp_sent"] = True
+                    st.sidebar.info("OTP Request Sent. Check your Mobile.")
+            except Exception as e:
+                st.sidebar.error(f"Failed to Send OTP: {str(e)}")
+    
+    # STEP 2: Enter Received Mobile OTP & Authenticate
+    else:
+        mobile_otp = st.text_input(
+            "Enter Mobile OTP", type="password", key="mobile_otp_input"
+        )
+        col_login, col_resend = st.columns([1, 1])
+
+        with col_login:
+            if st.button("Connect Live"):
+                if mobile_otp:
+                    try:
+                        login_url = f"{BASE_URL}/interactive/user/session"
+                        payload = {
+                            "secretKey": SKY_API_SECRET,
+                            "appKey": SKY_CLIENT_ID,
+                            "source": "WebAPI",
+                            "twoFA": mobile_otp,
+                        }
+                        res = requests.post(login_url, json=payload, timeout=3)
+                        if res.status_code == 200:
+                            token_data = (
+                                res.json().get("result", {}).get("token", None)
+                            )
+                            if token_data:
+                                st.session_state["sky_token"] = token_data
+                                st.sidebar.success("Connected to Skypro Live Feed!")
+                            else:
+                                st.sidebar.error("Invalid OTP or Response.")
+                        else:
+                            st.sidebar.error("Login Failed. Check OTP.")
+                    except Exception as e:
+                        st.sidebar.error(f"Auth Error: {str(e)}")
+                else:
+                    st.sidebar.warning("Enter OTP to proceed.")
+
+        with col_resend:
+            if st.button("Resend OTP"):
+                st.session_state["otp_sent"] = False
+                st.rerun()
+
+if st.session_state["sky_token"]:
+    st.sidebar.info("Status: Skypro Direct Feed Active 🟢")
 else:
     st.sidebar.warning("Status: Running on Backup Fast Feed 🟡")
 
@@ -85,11 +114,11 @@ else:
 # 2. Fast Live Data Fetcher Engine
 # ------------------------------------------
 def fetch_live_nifty_price():
-    # Primary Source: Gopocket Direct API (Zero Delay)
-    token = st.session_state.get("gopocket_token")
+    # Primary Source: Skypro Direct API Token
+    token = st.session_state.get("sky_token")
     if token:
         try:
-            quote_url = "https://api.gopocket.in/marketdata/instruments/quotes"
+            quote_url = f"{BASE_URL}/marketdata/instruments/quotes"
             headers = {"Authorization": token}
             quote_res = requests.get(
                 quote_url,
