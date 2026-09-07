@@ -16,7 +16,7 @@ st.set_page_config(
 
 st.title("📈 Nifty Live Paper Trading Dashboard")
 st.caption(
-    "Live Real-Time Option PnL Tracker | Target: +15 to +45 Pts | SL: -15 Pts | Fast Direct Feed"
+    "Live Real-Time PnL Tracker | Target: +15 to +45 Pts | SL: -15 Pts | NSE Direct Feed"
 )
 
 LOT_SIZE = 65
@@ -25,7 +25,7 @@ CSV_FILE = "trades_master.csv"
 
 
 # ------------------------------------------
-# 1. Fast NSE Live Data Fetcher
+# 1. Direct NSE Live Data Fetcher
 # ------------------------------------------
 def fetch_nse_live_data():
     headers = {
@@ -38,17 +38,16 @@ def fetch_nse_live_data():
     }
     session = requests.Session()
     try:
-        session.get("https://www.nseindia.com", headers=headers, timeout=1)
-        url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
-        response = session.get(url, headers=headers, timeout=1)
-
+        session.get("https://www.nseindia.com", headers=headers, timeout=2)
+        url = "https://www.nseindia.com/api/allIndices"
+        response = session.get(url, headers=headers, timeout=2)
         if response.status_code == 200:
             data = response.json()
-            if "data" in data and len(data["data"]) > 0:
-                return float(data["data"][0]["lastPrice"])
+            for index in data.get("data", []):
+                if index.get("index") == "NIFTY 50":
+                    return float(index.get("last"))
     except Exception:
         pass
-
     return 23800.00
 
 
@@ -63,8 +62,8 @@ def init_master_csv():
                 "Time",
                 "Type",
                 "Option_Strike",
-                "Option_Entry_Price",
-                "Option_Current_Price",
+                "Entry_Price",
+                "Exit_Price",
                 "Status",
                 "Points_P&L",
                 "Rupees_P&L",
@@ -76,11 +75,7 @@ def init_master_csv():
 def load_all_trades():
     init_master_csv()
     try:
-        df = pd.read_csv(CSV_FILE)
-        # Structural check for compatibility
-        if "Entry_Price" in df.columns and "Option_Entry_Price" not in df.columns:
-            df.rename(columns={"Entry_Price": "Option_Entry_Price"}, inplace=True)
-        return df
+        return pd.read_csv(CSV_FILE)
     except Exception:
         return pd.DataFrame()
 
@@ -90,46 +85,48 @@ def update_trades_file(df):
 
 
 # ------------------------------------------
-# 3. Option Price & Live PnL Processing
+# 3. Real-Time Processing for Today's Trades
 # ------------------------------------------
 live_nifty_price = fetch_nse_live_data()
 all_trades_df = load_all_trades()
 
+# Live PnL Stream Update (For Today's OPEN Trades)
 if not all_trades_df.empty:
     for idx, row in all_trades_df.iterrows():
         if row["Date"] == TODAY_STR and row["Status"] == "OPEN":
-            # Real Option Premium estimation using Delta offset if external price is not provided
-            entry_price = float(row["Option_Entry_Price"])
+            entry = float(row["Entry_Price"])
             is_ce = "CE" in str(row["Type"])
 
-            # Live Option Price calculated dynamically based on Spot movement
-            # Delta ~ 0.5 for ATM Options
-            spot_ref = float(row.get("Spot_Reference", live_nifty_price))
-            spot_diff = live_nifty_price - spot_ref if is_ce else spot_ref - live_nifty_price
-            
-            curr_option_price = round(entry_price + (spot_diff * 0.5), 2)
-            all_trades_df.at[idx, "Option_Current_Price"] = curr_option_price
+            current_move = (
+                (live_nifty_price - entry)
+                if is_ce
+                else (entry - live_nifty_price)
+            )
 
-            pts_move = round(curr_option_price - entry_price, 2)
-
-            if pts_move >= 45.0:
-                all_trades_df.at[idx, "Option_Current_Price"] = entry_price + 45.0
+            if current_move >= 45.0:
+                all_trades_df.at[idx, "Exit_Price"] = (
+                    entry + 45.0 if is_ce else entry - 45.0
+                )
                 all_trades_df.at[idx, "Status"] = "TARGET HIT (+45)"
                 all_trades_df.at[idx, "Points_P&L"] = 45.0
                 all_trades_df.at[idx, "Rupees_P&L"] = 45.0 * LOT_SIZE
-            elif pts_move <= -15.0:
-                all_trades_df.at[idx, "Option_Current_Price"] = entry_price - 15.0
+            elif current_move <= -15.0:
+                all_trades_df.at[idx, "Exit_Price"] = (
+                    entry - 15.0 if is_ce else entry + 15.0
+                )
                 all_trades_df.at[idx, "Status"] = "SL HIT (-15)"
                 all_trades_df.at[idx, "Points_P&L"] = -15.0
                 all_trades_df.at[idx, "Rupees_P&L"] = -15.0 * LOT_SIZE
             else:
-                all_trades_df.at[idx, "Points_P&L"] = pts_move
-                all_trades_df.at[idx, "Rupees_P&L"] = round(pts_move * LOT_SIZE, 2)
+                all_trades_df.at[idx, "Points_P&L"] = round(current_move, 2)
+                all_trades_df.at[idx, "Rupees_P&L"] = round(
+                    current_move * LOT_SIZE, 2
+                )
 
     update_trades_file(all_trades_df)
 
 # ------------------------------------------
-# 4. Streamlit Dashboard View
+# 4. Streamlit Dashboard View with Date Filter
 # ------------------------------------------
 st.sidebar.header("🗓️ History Filter")
 
@@ -142,9 +139,7 @@ available_dates = (
 selected_date = st.sidebar.selectbox(
     "Select Date to View:",
     ["All Days"] + available_dates,
-    index=0
-    if TODAY_STR not in available_dates
-    else available_dates.index(TODAY_STR) + 1,
+    index=0 if TODAY_STR not in available_dates else available_dates.index(TODAY_STR) + 1,
 )
 
 if selected_date == "All Days":
@@ -202,8 +197,6 @@ with col_table:
     else:
         st.info("No recorded trades found for this filter.")
 
-# ------------------------------------------
-# 5. Fast 1-Second Auto Refresh
-# ------------------------------------------
-time.sleep(1)
+# Auto-refresh
+time.sleep(2)
 st.rerun()
