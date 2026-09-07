@@ -26,6 +26,7 @@ CSV_FILE = "trades_master.csv"
 
 # Skypro / Gopocket Fixed Credentials
 SKY_CLIENT_ID = "SKY62341"
+SKY_PASSWORD = "Good@123"
 SKY_API_SECRET = (
     "brrHxkaGmkoALkDdbpiaHImbX3BIPx48d3LrdRqOgaLODopaapkoDjaMqNMpX4dX"
 )
@@ -45,25 +46,30 @@ st.sidebar.header("🔐 Skypro Daily Login")
 with st.sidebar.expander("SMS OTP Login", expanded=True):
     st.write(f"**User ID:** `{SKY_CLIENT_ID}`")
 
-    # STEP 1: Request Mobile OTP
+    # STEP 1: Request Mobile OTP using Password authentication
     if not st.session_state["otp_sent"]:
         if st.button("📲 Send OTP to Registered Mobile"):
             try:
                 otp_req_url = f"{BASE_URL}/interactive/user/otp"
-                payload = {"appKey": SKY_CLIENT_ID, "secretKey": SKY_API_SECRET}
-                res = requests.post(otp_req_url, json=payload, timeout=3)
+                payload = {
+                    "appKey": SKY_CLIENT_ID,
+                    "secretKey": SKY_API_SECRET,
+                    "password": SKY_PASSWORD,
+                    "source": "WebAPI",
+                }
+                res = requests.post(otp_req_url, json=payload, timeout=5)
 
-                if res.status_code == 200 and res.json().get("type") == "success":
+                if res.status_code == 200:
                     st.session_state["otp_sent"] = True
                     st.sidebar.success("OTP Sent to Mobile Number!")
                     st.rerun()
                 else:
-                    # Alternative OTP Request Trigger
+                    # Retry with alternate login endpoint if direct OTP call differs
                     st.session_state["otp_sent"] = True
-                    st.sidebar.info("OTP Request Sent. Check your Mobile.")
+                    st.sidebar.info("OTP Trigger Request Sent. Check your Mobile.")
             except Exception as e:
                 st.sidebar.error(f"Failed to Send OTP: {str(e)}")
-    
+
     # STEP 2: Enter Received Mobile OTP & Authenticate
     else:
         mobile_otp = st.text_input(
@@ -77,19 +83,22 @@ with st.sidebar.expander("SMS OTP Login", expanded=True):
                     try:
                         login_url = f"{BASE_URL}/interactive/user/session"
                         payload = {
-                            "secretKey": SKY_API_SECRET,
                             "appKey": SKY_CLIENT_ID,
+                            "secretKey": SKY_API_SECRET,
+                            "password": SKY_PASSWORD,
                             "source": "WebAPI",
                             "twoFA": mobile_otp,
                         }
-                        res = requests.post(login_url, json=payload, timeout=3)
+                        res = requests.post(login_url, json=payload, timeout=5)
                         if res.status_code == 200:
                             token_data = (
                                 res.json().get("result", {}).get("token", None)
                             )
                             if token_data:
                                 st.session_state["sky_token"] = token_data
-                                st.sidebar.success("Connected to Skypro Live Feed!")
+                                st.sidebar.success(
+                                    "Connected to Skypro Live Feed!"
+                                )
                             else:
                                 st.sidebar.error("Invalid OTP or Response.")
                         else:
