@@ -16,43 +16,53 @@ st.set_page_config(
 
 st.title("📈 Nifty Live Paper Trading Dashboard")
 st.caption(
-    "Live Real-Time PnL Tracker | Target: +15 to +45 Pts | SL: -15 Pts | NSE Direct Feed"
+    "Live Real-Time ITM Option PnL Tracker | Target: +45 Pts Premium | SL: -15 Pts Premium"
 )
 
 LOT_SIZE = 65
+ITM_DELTA = 0.70  # Delta value for ITM Options (~0.70)
 TODAY_STR = datetime.now().strftime("%Y-%m-%d")
 CSV_FILE = "trades_master.csv"
 
 
 # ------------------------------------------
-# 1. Direct NSE Live Data Fetcher
+# 1. Direct Fast Live Data Fetcher
 # ------------------------------------------
-def fetch_nse_live_data():
+def fetch_live_market_price():
+    """Fetches fast real-time Nifty Spot Price for ITM Option dynamic calculation"""
+    url = "https://priceapi.moneycontrol.com/technicalData/v1/index/technicalChartData?symbol=IN%3BNSX&time=1"
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.nseindia.com",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": "https://www.moneycontrol.com/",
     }
-    session = requests.Session()
     try:
-        session.get("https://www.nseindia.com", headers=headers, timeout=2)
-        url = "https://www.nseindia.com/api/allIndices"
-        response = session.get(url, headers=headers, timeout=2)
-        if response.status_code == 200:
-            data = response.json()
-            for index in data.get("data", []):
-                if index.get("index") == "NIFTY 50":
-                    return float(index.get("last"))
+        res = requests.get(url, headers=headers, timeout=1.5)
+        if res.status_code == 200:
+            data = res.json()
+            if "data" in data and len(data["data"]) > 0:
+                return float(data["data"][-1][4])
     except Exception:
         pass
-    return 23800.00
+
+    # Backup Session Feed
+    try:
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=1.5)
+        res = session.get(
+            "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050",
+            headers=headers,
+            timeout=1.5,
+        )
+        if res.status_code == 200:
+            return float(res.json()["data"][0]["lastPrice"])
+    except Exception:
+        pass
+
+    return 23772.05
 
 
 # ------------------------------------------
-# 2. Master CSV Database Operations
+# 2. Database Initialization & Support
 # ------------------------------------------
 def init_master_csv():
     if not os.path.exists(CSV_FILE):
@@ -62,11 +72,12 @@ def init_master_csv():
                 "Time",
                 "Type",
                 "Option_Strike",
-                "Entry_Price",
-                "Exit_Price",
+                "Option_Entry_Price",
+                "Option_Current_Price",
                 "Status",
                 "Points_P&L",
                 "Rupees_P&L",
+                "Spot_Reference",
             ]
         )
         df_empty.to_csv(CSV_FILE, index=False)
@@ -75,7 +86,11 @@ def init_master_csv():
 def load_all_trades():
     init_master_csv()
     try:
-        return pd.read_csv(CSV_FILE)
+        df = pd.read_csv(CSV_FILE)
+        # Old Schema Compatibility
+        if "Entry_Price" in df.columns and "Option_Entry_Price" not in df.columns:
+            df.rename(columns={"Entry_Price": "Option_Entry_Price"}, inplace=True)
+        return df
     except Exception:
         return pd.DataFrame()
 
@@ -85,48 +100,66 @@ def update_trades_file(df):
 
 
 # ------------------------------------------
-# 3. Real-Time Processing for Today's Trades
+# 3. ITM Option Premium PnL Engine
 # ------------------------------------------
-live_nifty_price = fetch_nse_live_data()
+live_nifty_price = fetch_live_market_price()
 all_trades_df = load_all_trades()
 
-# Live PnL Stream Update (For Today's OPEN Trades)
 if not all_trades_df.empty:
     for idx, row in all_trades_df.iterrows():
         if row["Date"] == TODAY_STR and row["Status"] == "OPEN":
-            entry = float(row["Entry_Price"])
+            entry_premium = float(row["Option_Entry_Price"])
             is_ce = "CE" in str(row["Type"])
 
-            current_move = (
-                (live_nifty_price - entry)
+            # Spot Reference price when order was placed
+            spot_ref = float(row.get("Spot_Reference", live_nifty_price))
+            if pd.isna(spot_ref) or spot_ref <= 0:
+                spot_ref = live_nifty_price
+                all_trades_df.at[idx, "Spot_Reference"] = spot_ref
+
+            # Spot price movement calculation
+            spot_diff = (
+                (live_nifty_price - spot_ref)
                 if is_ce
-                else (entry - live_nifty_price)
+                else (spot_ref - live_nifty_price)
             )
 
-            if current_move >= 45.0:
-                all_trades_df.at[idx, "Exit_Price"] = (
-                    entry + 45.0 if is_ce else entry - 45.0
+            # Live ITM Premium estimation based on Delta 0.70
+            current_option_premium = round(
+                entry_premium + (spot_diff * ITM_DELTA), 2
+            )
+            all_trades_df.at[idx, "Option_Current_Price"] = (
+                current_option_premium
+            )
+
+            # Premium Movement Points
+            premium_pts_move = round(current_option_premium - entry_premium, 2)
+
+            # Target / SL based STRICTLY on ITM Option Premium (+45 / -15)
+            if premium_pts_move >= 45.0:
+                all_trades_df.at[idx, "Option_Current_Price"] = (
+                    entry_premium + 45.0
                 )
                 all_trades_df.at[idx, "Status"] = "TARGET HIT (+45)"
                 all_trades_df.at[idx, "Points_P&L"] = 45.0
                 all_trades_df.at[idx, "Rupees_P&L"] = 45.0 * LOT_SIZE
-            elif current_move <= -15.0:
-                all_trades_df.at[idx, "Exit_Price"] = (
-                    entry - 15.0 if is_ce else entry + 15.0
+            elif premium_pts_move <= -15.0:
+                all_trades_df.at[idx, "Option_Current_Price"] = (
+                    entry_premium - 15.0
                 )
                 all_trades_df.at[idx, "Status"] = "SL HIT (-15)"
                 all_trades_df.at[idx, "Points_P&L"] = -15.0
                 all_trades_df.at[idx, "Rupees_P&L"] = -15.0 * LOT_SIZE
             else:
-                all_trades_df.at[idx, "Points_P&L"] = round(current_move, 2)
+                all_trades_df.at[idx, "Points_P&L"] = premium_pts_move
                 all_trades_df.at[idx, "Rupees_P&L"] = round(
-                    current_move * LOT_SIZE, 2
+                    premium_pts_move * LOT_SIZE, 2
                 )
 
     update_trades_file(all_trades_df)
 
 # ------------------------------------------
-# 4. Streamlit Dashboard View with Date Filter
+# 4. Streamlit UI Dashboard
 # ------------------------------------------
 st.sidebar.header("🗓️ History Filter")
 
@@ -139,7 +172,9 @@ available_dates = (
 selected_date = st.sidebar.selectbox(
     "Select Date to View:",
     ["All Days"] + available_dates,
-    index=0 if TODAY_STR not in available_dates else available_dates.index(TODAY_STR) + 1,
+    index=0
+    if TODAY_STR not in available_dates
+    else available_dates.index(TODAY_STR) + 1,
 )
 
 if selected_date == "All Days":
@@ -147,7 +182,7 @@ if selected_date == "All Days":
 else:
     view_trades = all_trades_df[all_trades_df["Date"] == selected_date]
 
-# Metrics
+# Metrics Breakdown
 tot_trades = len(view_trades)
 net_pts = (
     view_trades["Points_P&L"].sum()
@@ -197,6 +232,6 @@ with col_table:
     else:
         st.info("No recorded trades found for this filter.")
 
-# Auto-refresh
-time.sleep(2)
+# 1-Second Refresh Loop
+time.sleep(1)
 st.rerun()
