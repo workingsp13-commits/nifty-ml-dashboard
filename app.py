@@ -21,14 +21,13 @@ st.caption(
 
 LOT_SIZE = 65
 TODAY_STR = datetime.now().strftime("%Y-%m-%d")
-CSV_FILE = f"live_trades_{TODAY_STR}.csv"
+CSV_FILE = "trades_master.csv"
 
 
 # ------------------------------------------
 # 1. Direct NSE Live Data Fetcher
 # ------------------------------------------
 def fetch_nse_live_data():
-    """Fetches Real-Time Nifty Price directly from NSE API"""
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -49,21 +48,13 @@ def fetch_nse_live_data():
                     return float(index.get("last"))
     except Exception:
         pass
-
-    if os.path.exists(CSV_FILE):
-        try:
-            df_temp = pd.read_csv(CSV_FILE)
-            if not df_temp.empty and "Entry_Price" in df_temp.columns:
-                return float(df_temp["Entry_Price"].iloc[-1])
-        except Exception:
-            pass
     return 23800.00
 
 
 # ------------------------------------------
-# 2. Local CSV Data Management (Persistent Log)
+# 2. Master CSV Database Operations
 # ------------------------------------------
-def init_today_csv():
+def init_master_csv():
     if not os.path.exists(CSV_FILE):
         df_empty = pd.DataFrame(
             columns=[
@@ -81,8 +72,8 @@ def init_today_csv():
         df_empty.to_csv(CSV_FILE, index=False)
 
 
-def load_today_trades():
-    init_today_csv()
+def load_all_trades():
+    init_master_csv()
     try:
         return pd.read_csv(CSV_FILE)
     except Exception:
@@ -94,15 +85,15 @@ def update_trades_file(df):
 
 
 # ------------------------------------------
-# 3. Live Price & Position Processing
+# 3. Real-Time Processing for Today's Trades
 # ------------------------------------------
 live_nifty_price = fetch_nse_live_data()
-trades_df = load_today_trades()
+all_trades_df = load_all_trades()
 
-# Real-time Position Live Stream Engine
-if not trades_df.empty:
-    for idx, row in trades_df.iterrows():
-        if row["Status"] == "OPEN":
+# Live PnL Stream Update (For Today's OPEN Trades)
+if not all_trades_df.empty:
+    for idx, row in all_trades_df.iterrows():
+        if row["Date"] == TODAY_STR and row["Status"] == "OPEN":
             entry = float(row["Entry_Price"])
             is_ce = "CE" in str(row["Type"])
 
@@ -113,52 +104,71 @@ if not trades_df.empty:
             )
 
             if current_move >= 45.0:
-                trades_df.at[idx, "Exit_Price"] = (
+                all_trades_df.at[idx, "Exit_Price"] = (
                     entry + 45.0 if is_ce else entry - 45.0
                 )
-                trades_df.at[idx, "Status"] = "TARGET HIT (+45)"
-                trades_df.at[idx, "Points_P&L"] = 45.0
-                trades_df.at[idx, "Rupees_P&L"] = 45.0 * LOT_SIZE
+                all_trades_df.at[idx, "Status"] = "TARGET HIT (+45)"
+                all_trades_df.at[idx, "Points_P&L"] = 45.0
+                all_trades_df.at[idx, "Rupees_P&L"] = 45.0 * LOT_SIZE
             elif current_move <= -15.0:
-                trades_df.at[idx, "Exit_Price"] = (
+                all_trades_df.at[idx, "Exit_Price"] = (
                     entry - 15.0 if is_ce else entry + 15.0
                 )
-                trades_df.at[idx, "Status"] = "SL HIT (-15)"
-                trades_df.at[idx, "Points_P&L"] = -15.0
-                trades_df.at[idx, "Rupees_P&L"] = -15.0 * LOT_SIZE
+                all_trades_df.at[idx, "Status"] = "SL HIT (-15)"
+                all_trades_df.at[idx, "Points_P&L"] = -15.0
+                all_trades_df.at[idx, "Rupees_P&L"] = -15.0 * LOT_SIZE
             else:
-                trades_df.at[idx, "Points_P&L"] = round(current_move, 2)
-                trades_df.at[idx, "Rupees_P&L"] = round(
+                all_trades_df.at[idx, "Points_P&L"] = round(current_move, 2)
+                all_trades_df.at[idx, "Rupees_P&L"] = round(
                     current_move * LOT_SIZE, 2
                 )
 
-    update_trades_file(trades_df)
+    update_trades_file(all_trades_df)
 
 # ------------------------------------------
-# 4. Streamlit Dashboard View
+# 4. Streamlit Dashboard View with Date Filter
 # ------------------------------------------
+st.sidebar.header("🗓️ History Filter")
+
+available_dates = (
+    sorted(all_trades_df["Date"].unique().tolist(), reverse=True)
+    if not all_trades_df.empty
+    else [TODAY_STR]
+)
+
+selected_date = st.sidebar.selectbox(
+    "Select Date to View:",
+    ["All Days"] + available_dates,
+    index=0 if TODAY_STR not in available_dates else available_dates.index(TODAY_STR) + 1,
+)
+
+if selected_date == "All Days":
+    view_trades = all_trades_df
+else:
+    view_trades = all_trades_df[all_trades_df["Date"] == selected_date]
+
 # Metrics
-tot_trades = len(trades_df)
+tot_trades = len(view_trades)
 net_pts = (
-    trades_df["Points_P&L"].sum()
-    if tot_trades > 0 and "Points_P&L" in trades_df.columns
+    view_trades["Points_P&L"].sum()
+    if tot_trades > 0 and "Points_P&L" in view_trades.columns
     else 0.0
 )
 net_rs = (
-    trades_df["Rupees_P&L"].sum()
-    if tot_trades > 0 and "Rupees_P&L" in trades_df.columns
+    view_trades["Rupees_P&L"].sum()
+    if tot_trades > 0 and "Rupees_P&L" in view_trades.columns
     else 0.0
 )
 wins = (
-    (trades_df["Points_P&L"] > 0).sum()
-    if tot_trades > 0 and "Points_P&L" in trades_df.columns
+    (view_trades["Points_P&L"] > 0).sum()
+    if tot_trades > 0 and "Points_P&L" in view_trades.columns
     else 0
 )
 win_rate = round((wins / tot_trades * 100), 2) if tot_trades > 0 else 0.0
 
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("NSE Live Nifty", f"{live_nifty_price:.2f}")
-c2.metric("Today Trades", tot_trades)
+c2.metric("Total Trades", tot_trades)
 c3.metric("Net Points P&L", f"{net_pts:+.2f} Pts")
 c4.metric("Net Rupees P&L", f"₹ {net_rs:,.2f}")
 c5.metric("Win Rate", f"{win_rate}%")
@@ -169,7 +179,6 @@ col_chart, col_table = st.columns([4, 6])
 
 with col_chart:
     st.subheader("📊 Live Nifty Spot Price")
-    # Display Full Exact Price without 23.8k short formatting
     fig = go.Figure(
         go.Indicator(
             mode="number",
@@ -182,12 +191,12 @@ with col_chart:
     st.plotly_chart(fig, use_container_width=True)
 
 with col_table:
-    st.subheader(f"📜 Today's Live Positions & Signals ({TODAY_STR})")
-    if not trades_df.empty:
-        st.dataframe(trades_df, use_container_width=True, height=300)
+    st.subheader(f"📜 Trade Signals & Positions ({selected_date})")
+    if not view_trades.empty:
+        st.dataframe(view_trades, use_container_width=True, height=300)
     else:
-        st.info("No active positions recorded for today yet.")
+        st.info("No recorded trades found for this filter.")
 
-# Auto-refresh app every 2 seconds for live stream
+# Auto-refresh
 time.sleep(2)
 st.rerun()
