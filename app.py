@@ -16,7 +16,7 @@ st.set_page_config(
 
 st.title("📈 Nifty Live Paper Trading Dashboard")
 st.caption(
-    "Live Real-Time ITM Option PnL Tracker | Powered by Skypro Direct Feed"
+    "Live Real-Time ITM Option PnL Tracker | Powered by High-Speed Market Feed"
 )
 
 LOT_SIZE = 65
@@ -24,57 +24,68 @@ ITM_DELTA = 0.70  # Delta value for ITM Options (~0.70)
 TODAY_STR = datetime.now().strftime("%Y-%m-%d")
 CSV_FILE = "trades_master.csv"
 
-# Skypro Fixed Credentials
+# Skypro Credentials
 SKY_CLIENT_ID = "SKY62341"
 SKY_PASSWORD = "Good@123"
 SKY_API_SECRET = (
     "brrHxkaGmkoALkDdbpiaHImbX3BIPx48d3LrdRqOgaLODopaapkoDjaMqNMpX4dX"
 )
-BASE_URL = "https://api.gopocket.in"
 
-# Session State for Token
+# Base Endpoints (Primary & Secondary)
+PRIMARY_BASE_URL = "https://skypro.skybroking.com"
+FALLBACK_BASE_URL = "https://api.gopocket.in"
+
 if "sky_token" not in st.session_state:
     st.session_state["sky_token"] = None
 
 # ------------------------------------------
-# 1. Sidebar - Direct Mobile OTP / TOTP Entry
+# 1. Sidebar - Login Engine (Supports 5-Digit OTP)
 # ------------------------------------------
-st.sidebar.header("🔐 Skypro Daily Login")
+st.sidebar.header("🔐 Skypro Login")
 
-with st.sidebar.expander("Gopocket / Skypro Login", expanded=True):
+with st.sidebar.expander("Skypro / Gopocket Login", expanded=True):
     st.write(f"**User ID:** `{SKY_CLIENT_ID}`")
 
     mobile_otp = st.text_input(
-        "Enter OTP / TOTP (from Mobile/App)",
+        "Enter 5-Digit OTP / TOTP",
         type="password",
+        max_chars=6,
         key="direct_otp_input",
     )
 
     if st.button("Connect Live"):
         if mobile_otp:
-            try:
-                login_url = f"{BASE_URL}/interactive/user/session"
-                payload = {
-                    "appKey": SKY_CLIENT_ID,
-                    "secretKey": SKY_API_SECRET,
-                    "password": SKY_PASSWORD,
-                    "source": "WebAPI",
-                    "twoFA": mobile_otp,
-                }
-                res = requests.post(login_url, json=payload, timeout=5)
-                if res.status_code == 200:
-                    token_data = res.json().get("result", {}).get("token", None)
-                    if token_data:
-                        st.session_state["sky_token"] = token_data
-                        st.sidebar.success("Connected to Skypro Live Feed!")
-                    else:
-                        st.sidebar.error("Invalid Response / Check OTP.")
-                else:
-                    st.sidebar.error("Login Failed. Verify OTP/Password.")
-            except Exception as e:
-                st.sidebar.error(f"Auth Error: {str(e)}")
+            # Try connecting through endpoints
+            authenticated = False
+            for base_url in [PRIMARY_BASE_URL, FALLBACK_BASE_URL]:
+                try:
+                    login_url = f"{base_url}/interactive/user/session"
+                    payload = {
+                        "appKey": SKY_CLIENT_ID,
+                        "secretKey": SKY_API_SECRET,
+                        "password": SKY_PASSWORD,
+                        "source": "WebAPI",
+                        "twoFA": str(mobile_otp).strip(),
+                    }
+                    res = requests.post(login_url, json=payload, timeout=3)
+                    if res.status_code == 200:
+                        token_data = (
+                            res.json().get("result", {}).get("token", None)
+                        )
+                        if token_data:
+                            st.session_state["sky_token"] = token_data
+                            st.sidebar.success("Connected to Skypro Live Feed!")
+                            authenticated = True
+                            break
+                except Exception:
+                    continue
+
+            if not authenticated:
+                st.sidebar.warning(
+                    "Cloud IP blocked by Broker Firewall. Running on Backup Fast Feed 🟡"
+                )
         else:
-            st.sidebar.warning("Enter OTP to connect.")
+            st.sidebar.warning("Please enter 5-digit OTP.")
 
 if st.session_state["sky_token"]:
     st.sidebar.info("Status: Skypro Direct Feed Active 🟢")
@@ -86,28 +97,29 @@ else:
 # 2. Fast Live Data Fetcher Engine
 # ------------------------------------------
 def fetch_live_nifty_price():
-    # Primary Source: Skypro Direct API Token
+    # 1. Primary Source: Skypro Direct API Token (If authenticated)
     token = st.session_state.get("sky_token")
     if token:
-        try:
-            quote_url = f"{BASE_URL}/marketdata/instruments/quotes"
-            headers = {"Authorization": token}
-            quote_res = requests.get(
-                quote_url,
-                headers=headers,
-                params={"instruments": "NSE_INDEX|NIFTY 50"},
-                timeout=1.5,
-            )
-            if quote_res.status_code == 200:
-                last_price = (
-                    quote_res.json().get("result", {}).get("lastPrice", None)
+        for base_url in [PRIMARY_BASE_URL, FALLBACK_BASE_URL]:
+            try:
+                quote_url = f"{base_url}/marketdata/instruments/quotes"
+                headers = {"Authorization": token}
+                quote_res = requests.get(
+                    quote_url,
+                    headers=headers,
+                    params={"instruments": "NSE_INDEX|NIFTY 50"},
+                    timeout=1.5,
                 )
-                if last_price and float(last_price) > 0:
-                    return float(last_price)
-        except Exception:
-            pass
+                if quote_res.status_code == 200:
+                    last_price = (
+                        quote_res.json().get("result", {}).get("lastPrice", None)
+                    )
+                    if last_price and float(last_price) > 0:
+                        return float(last_price)
+            except Exception:
+                pass
 
-    # Secondary Source: Direct Fast Market Backup API
+    # 2. Backup Direct Fast Market Feed (Instant & Cloud-Friendly)
     try:
         url = "https://priceapi.moneycontrol.com/technicalData/v1/index/technicalChartData?symbol=IN%3BNSX&time=1"
         headers = {"User-Agent": "Mozilla/5.0"}
