@@ -15,111 +15,18 @@ st.set_page_config(
 )
 
 st.title("📈 Nifty Live Paper Trading Dashboard")
-st.caption(
-    "Live Real-Time ITM Option PnL Tracker | Powered by High-Speed Market Feed"
-)
+st.caption("Live Real-Time ITM Option PnL Tracker | High-Speed Direct Feed")
 
 LOT_SIZE = 65
 ITM_DELTA = 0.70  # Delta value for ITM Options (~0.70)
 TODAY_STR = datetime.now().strftime("%Y-%m-%d")
 CSV_FILE = "trades_master.csv"
 
-# Skypro Credentials
-SKY_CLIENT_ID = "SKY62341"
-SKY_PASSWORD = "Good@123"
-SKY_API_SECRET = (
-    "brrHxkaGmkoALkDdbpiaHImbX3BIPx48d3LrdRqOgaLODopaapkoDjaMqNMpX4dX"
-)
-
-# Base Endpoints (Primary & Secondary)
-PRIMARY_BASE_URL = "https://skypro.skybroking.com"
-FALLBACK_BASE_URL = "https://api.gopocket.in"
-
-if "sky_token" not in st.session_state:
-    st.session_state["sky_token"] = None
 
 # ------------------------------------------
-# 1. Sidebar - Login Engine (Supports 5-Digit OTP)
-# ------------------------------------------
-st.sidebar.header("🔐 Skypro Login")
-
-with st.sidebar.expander("Skypro / Gopocket Login", expanded=True):
-    st.write(f"**User ID:** `{SKY_CLIENT_ID}`")
-
-    mobile_otp = st.text_input(
-        "Enter 5-Digit OTP / TOTP",
-        type="password",
-        max_chars=6,
-        key="direct_otp_input",
-    )
-
-    if st.button("Connect Live"):
-        if mobile_otp:
-            # Try connecting through endpoints
-            authenticated = False
-            for base_url in [PRIMARY_BASE_URL, FALLBACK_BASE_URL]:
-                try:
-                    login_url = f"{base_url}/interactive/user/session"
-                    payload = {
-                        "appKey": SKY_CLIENT_ID,
-                        "secretKey": SKY_API_SECRET,
-                        "password": SKY_PASSWORD,
-                        "source": "WebAPI",
-                        "twoFA": str(mobile_otp).strip(),
-                    }
-                    res = requests.post(login_url, json=payload, timeout=3)
-                    if res.status_code == 200:
-                        token_data = (
-                            res.json().get("result", {}).get("token", None)
-                        )
-                        if token_data:
-                            st.session_state["sky_token"] = token_data
-                            st.sidebar.success("Connected to Skypro Live Feed!")
-                            authenticated = True
-                            break
-                except Exception:
-                    continue
-
-            if not authenticated:
-                st.sidebar.warning(
-                    "Cloud IP blocked by Broker Firewall. Running on Backup Fast Feed 🟡"
-                )
-        else:
-            st.sidebar.warning("Please enter 5-digit OTP.")
-
-if st.session_state["sky_token"]:
-    st.sidebar.info("Status: Skypro Direct Feed Active 🟢")
-else:
-    st.sidebar.warning("Status: Running on Backup Fast Feed 🟡")
-
-
-# ------------------------------------------
-# 2. Fast Live Data Fetcher Engine
+# 1. Fast Live Data Fetcher Engine
 # ------------------------------------------
 def fetch_live_nifty_price():
-    # 1. Primary Source: Skypro Direct API Token (If authenticated)
-    token = st.session_state.get("sky_token")
-    if token:
-        for base_url in [PRIMARY_BASE_URL, FALLBACK_BASE_URL]:
-            try:
-                quote_url = f"{base_url}/marketdata/instruments/quotes"
-                headers = {"Authorization": token}
-                quote_res = requests.get(
-                    quote_url,
-                    headers=headers,
-                    params={"instruments": "NSE_INDEX|NIFTY 50"},
-                    timeout=1.5,
-                )
-                if quote_res.status_code == 200:
-                    last_price = (
-                        quote_res.json().get("result", {}).get("lastPrice", None)
-                    )
-                    if last_price and float(last_price) > 0:
-                        return float(last_price)
-            except Exception:
-                pass
-
-    # 2. Backup Direct Fast Market Feed (Instant & Cloud-Friendly)
     try:
         url = "https://priceapi.moneycontrol.com/technicalData/v1/index/technicalChartData?symbol=IN%3BNSX&time=1"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -135,7 +42,7 @@ def fetch_live_nifty_price():
 
 
 # ------------------------------------------
-# 3. Master CSV Database Operations
+# 2. Master CSV Database Operations
 # ------------------------------------------
 def init_master_csv():
     if not os.path.exists(CSV_FILE):
@@ -177,7 +84,7 @@ def update_trades_file(df):
 
 
 # ------------------------------------------
-# 4. ITM Option Live PnL Processing Engine
+# 3. ITM Option Live PnL Processing Engine
 # ------------------------------------------
 live_nifty_price = fetch_live_nifty_price()
 all_trades_df = load_all_trades()
@@ -233,9 +140,8 @@ if not all_trades_df.empty:
     update_trades_file(all_trades_df)
 
 # ------------------------------------------
-# 5. Streamlit UI Dashboard & Date Filter
+# 4. Streamlit UI Dashboard & Date Filter
 # ------------------------------------------
-st.sidebar.markdown("---")
 st.sidebar.header("🗓️ History Filter")
 
 available_dates = (
@@ -256,6 +162,9 @@ if selected_date == "All Days":
     view_trades = all_trades_df
 else:
     view_trades = all_trades_df[all_trades_df["Date"] == selected_date]
+
+st.sidebar.markdown("---")
+st.sidebar.success("Status: Direct Market Feed Active 🟢")
 
 # Metrics Breakdown
 tot_trades = len(view_trades)
